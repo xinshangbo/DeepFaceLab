@@ -6,6 +6,8 @@ from utils import Path_utils
 import cv2
 from tqdm import tqdm
 from utils.DFLPNG import DFLPNG
+from utils.DFLJPG import DFLJPG
+from utils.cv2_utils import *
 from utils import image_utils
 import shutil
 import numpy as np
@@ -153,7 +155,7 @@ class ConvertSubprocessor(SubprocessorBase):
                 print ( 'no faces found for %s, copying without faces' % (filename_path.name) )
                 shutil.copy ( str(filename_path), str(output_filename_path) )
         else:
-            image = (cv2.imread(str(filename_path)) / 255.0).astype(np.float32)
+            image = (cv2_imread(str(filename_path)) / 255.0).astype(np.float32)
 
             if self.converter.get_mode() == ConverterBase.MODE_IMAGE:
                 image = self.converter.convert_image(image, None, self.debug)
@@ -163,7 +165,14 @@ class ConvertSubprocessor(SubprocessorBase):
                         cv2.waitKey(0)
                 faces_processed = 1
             elif self.converter.get_mode() == ConverterBase.MODE_IMAGE_WITH_LANDMARKS:
-                image_landmarks = DFLPNG.load( str(filename_path), throw_on_no_embedded_data=True ).get_landmarks()
+                if filename_path.suffix == '.png':
+                    dflimg = DFLPNG.load( str(filename_path), throw_on_no_embedded_data=True )
+                elif filename_path.suffix == '.jpg':
+                    dflimg = DFLJPG.load ( str(filename_path), throw_on_no_embedded_data=True )
+                else:
+                    raise Exception ("%s is not a dfl image file" % (filename_path.name) ) 
+            
+                image_landmarks = dflimg.get_landmarks()
                         
                 image = self.converter.convert_image(image, image_landmarks, self.debug)
                 if self.debug:
@@ -181,7 +190,7 @@ class ConvertSubprocessor(SubprocessorBase):
                         image = self.converter.convert_face(image, image_landmarks, self.debug)     
                         if self.debug:
                             for img in image:
-                                cv2.imshow ('Debug convert', img )
+                                cv2.imshow ('Debug convert', (img*255).astype(np.uint8) )
                                 cv2.waitKey(0)
                     except Exception as e:
                         print ( 'Error while converting face_num [%d] in file [%s]: %s' % (face_num, filename_path, str(e)) )
@@ -189,7 +198,7 @@ class ConvertSubprocessor(SubprocessorBase):
                 faces_processed = len(faces)
                     
             if not self.debug:
-                cv2.imwrite (str(output_filename_path), (image*255).astype(np.uint8) )
+                cv2_imwrite (str(output_filename_path), (image*255).astype(np.uint8) )
             
             
         return (files_processed, faces_processed)
@@ -259,16 +268,21 @@ def main (input_dir, output_dir, model_dir, model_name, aligned_dir=None, **in_o
             alignments = {}
             
             aligned_path_image_paths = Path_utils.get_image_paths(aligned_path)
-            for filename in tqdm(aligned_path_image_paths, desc= "Collecting alignments" ):
-                dflpng = DFLPNG.load( str(filename), print_on_no_embedded_data=True )                
-                if dflpng is None:
-                    continue
+            for filepath in tqdm(aligned_path_image_paths, desc="Collecting alignments", ascii=True ):
+                filepath = Path(filepath)
                 
-                source_filename_stem = Path( dflpng.get_source_filename() ).stem
+                if filepath.suffix == '.png':
+                    dflimg = DFLPNG.load( str(filepath), print_on_no_embedded_data=True )
+                elif filepath.suffix == '.jpg':
+                    dflimg = DFLJPG.load ( str(filepath), print_on_no_embedded_data=True )
+                else:
+                    print ("%s is not a dfl image file" % (filepath.name) ) 
+                
+                source_filename_stem = Path( dflimg.get_source_filename() ).stem
                 if source_filename_stem not in alignments.keys():
                     alignments[ source_filename_stem ] = []
 
-                alignments[ source_filename_stem ].append (dflpng.get_source_landmarks())
+                alignments[ source_filename_stem ].append (dflimg.get_source_landmarks())
         
             
             #interpolate landmarks

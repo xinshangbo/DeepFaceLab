@@ -1,7 +1,7 @@
 ﻿import sys
 import traceback
 import queue
-import colorsys  
+import colorsys
 import time
 import numpy as np
 import itertools
@@ -10,6 +10,7 @@ from pathlib import Path
 from utils import Path_utils
 from utils import image_utils    
 import cv2
+import models
 
 def trainerThread (input_queue, output_queue, training_data_src_dir, training_data_dst_dir, model_path, model_name, save_interval_min=10, debug=False, **in_options):
 
@@ -29,8 +30,7 @@ def trainerThread (input_queue, output_queue, training_data_src_dir, training_da
                 
             if not model_path.exists():
                 model_path.mkdir(exist_ok=True)
-
-            import models 
+   
             model = models.import_model(model_name)(
                         model_path, 
                         training_data_src_path=training_data_src_path, 
@@ -126,6 +126,7 @@ def previewThread (input_queue, output_queue):
     update_preview = False
     is_showing = False
     is_waiting_preview = False
+    show_last_history_epochs_count = 0    
     epoch = 0
     while True:      
         if not input_queue.empty():
@@ -163,16 +164,15 @@ def previewThread (input_queue, output_queue):
                 
         if update_preview:
             update_preview = False
-            (h,w,c) = previews[0][1].shape
-            
+
             selected_preview_name = previews[selected_preview][0]
             selected_preview_rgb = previews[selected_preview][1]
+            (h,w,c) = selected_preview_rgb.shape
             
             # HEAD
-            head_text_color = [0.8]*c
             head_lines = [
                 '[s]:save [enter]:exit',
-                '[p]:update [space]:next preview',
+                '[p]:update [space]:next preview [l]:change history range',
                 'Preview: "%s" [%d/%d]' % (selected_preview_name,selected_preview+1, len(previews) )
                 ] 
             head_line_height = 15
@@ -182,77 +182,23 @@ def previewThread (input_queue, output_queue):
             for i in range(0, len(head_lines)):
                 t = i*head_line_height
                 b = (i+1)*head_line_height
-                head[t:b, 0:w] += image_utils.get_text_image (  (w,head_line_height,c) , head_lines[i], color=head_text_color )
+                head[t:b, 0:w] += image_utils.get_text_image (  (w,head_line_height,c) , head_lines[i], color=[0.8]*c )
                 
             final = head
    
-            if loss_history is not None:
-                # LOSS HISTORY
-                loss_history = np.array (loss_history)
-                
-                lh_height = 100
-                lh_img = np.ones ( (lh_height,w,c) ) * 0.1
-                loss_count = len(loss_history[0])
-                lh_len = len(loss_history)
-                
-                l_per_col = lh_len / w                
-                plist_max = [   [   max (0.0, 0.0,  *[  loss_history[i_ab][p] 
-                                                        for i_ab in range( int(col*l_per_col), int((col+1)*l_per_col) )                                         
-                                                     ]
-                                        ) 
-                                    for p in range(0,loss_count) 
-                                ]  
-                                for col in range(0, w) 
-                            ] 
-                            
-                            
-                plist_min = [   [   min (plist_max[col][p], 
-                                         plist_max[col][p],  
-                                                    *[  loss_history[i_ab][p] 
-                                                        for i_ab in range( int(col*l_per_col), int((col+1)*l_per_col) )                                         
-                                                     ]
-                                        ) 
-                                    for p in range(0,loss_count) 
-                                ]  
-                                for col in range(0, w) 
-                            ]
-                plist_abs_max = np.mean(loss_history[ len(loss_history) // 5 : ]) * 2
-                
-                if l_per_col >= 1.0:
-                    for col in range(0, w):
-                        for p in range(0,loss_count): 
-                            point_color = [1.0]*c
-                            point_color[0:3] = colorsys.hsv_to_rgb ( p * (1.0/loss_count), 1.0, 1.0 )
-                            
-                            ph_max = int ( (plist_max[col][p] / plist_abs_max) * (lh_height-1) )
-                            ph_max = np.clip( ph_max, 0, lh_height-1 )
-                            
-                            ph_min = int ( (plist_min[col][p] / plist_abs_max) * (lh_height-1) )
-                            ph_min = np.clip( ph_min, 0, lh_height-1 )
-                            
-                            for ph in range(ph_min, ph_max+1):
-                                lh_img[ (lh_height-ph-1), col ] = point_color
-                                
-                lh_lines = 5
-                lh_line_height = (lh_height-1)/lh_lines
-                for i in range(0,lh_lines+1):
-                    lh_img[ int(i*lh_line_height), : ] = (0.8,)*c
-                    
-                last_line_t = int((lh_lines-1)*lh_line_height)
-                last_line_b = int(lh_lines*lh_line_height)
-                
-                if epoch != 0:
-                    lh_text = 'Loss history. Epoch: %d' % (epoch)
+            if loss_history is not None:                
+                if show_last_history_epochs_count == 0:
+                    loss_history_to_show = loss_history
                 else:
-                    lh_text = 'Loss history.'
-                
-                lh_img[last_line_t:last_line_b, 0:w] += image_utils.get_text_image (  (w,last_line_b-last_line_t,c), lh_text, color=head_text_color )
-                
+                    loss_history_to_show = loss_history[-show_last_history_epochs_count:]
+                    
+                lh_img = models.ModelBase.get_loss_history_preview(loss_history_to_show, epoch, w, c)
                 final = np.concatenate ( [final, lh_img], axis=0 )
-                
+
             final = np.concatenate ( [final, selected_preview_rgb], axis=0 )
+            final = np.clip(final, 0, 1)
             
-            cv2.imshow ( 'Training preview', final)
+            cv2.imshow ( 'Training preview', (final*255).astype(np.uint8) )
             is_showing = True
         
         if is_showing:
@@ -269,6 +215,18 @@ def previewThread (input_queue, output_queue):
             if not is_waiting_preview:
                 is_waiting_preview = True
                 output_queue.put ( {'op': 'preview'} )
+        elif key == ord('l'):
+            if show_last_history_epochs_count == 0:
+                show_last_history_epochs_count = 5000
+            elif show_last_history_epochs_count == 5000:
+                show_last_history_epochs_count = 10000
+            elif show_last_history_epochs_count == 10000:
+                show_last_history_epochs_count = 50000
+            elif show_last_history_epochs_count == 50000:
+                show_last_history_epochs_count = 100000    
+            elif show_last_history_epochs_count == 100000:
+                show_last_history_epochs_count = 0                
+            update_preview = True
         elif key == ord(' '):
             selected_preview = (selected_preview + 1) % len(previews)
             update_preview = True

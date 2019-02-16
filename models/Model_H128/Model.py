@@ -4,6 +4,7 @@ from nnlib import nnlib
 from models import ModelBase
 from facelib import FaceType
 from samples import *
+from utils.console_utils import *
 
 class Model(ModelBase):
 
@@ -12,11 +13,26 @@ class Model(ModelBase):
     decoder_dstH5 = 'decoder_dst.h5'
 
     #override
+    def onInitializeOptions(self, is_first_run, ask_override):        
+        if is_first_run:
+            self.options['lighter_ae'] = input_bool ("Use lightweight autoencoder? (y/n, ?:help skip:n) : ", False, help_message="Lightweight autoencoder is faster, requires less VRAM, sacrificing overall quality. If your GPU VRAM <= 4, you should to choose this option.")
+        else:
+            default_lighter_ae = self.options.get('created_vram_gb', 99) <= 4 #temporally support old models, deprecate in future
+            if 'created_vram_gb' in self.options.keys():
+                self.options.pop ('created_vram_gb')
+            self.options['lighter_ae'] = self.options.get('lighter_ae', default_lighter_ae)
+            
+        if is_first_run or ask_override:
+            self.options['pixel_loss'] = self.options['pixel_loss'] = input_bool ("Use pixel loss? (y/n, ?:help skip: n/default ) : ", False, help_message="Default DSSIM loss good for initial understanding structure of faces. Use pixel loss after 20k epochs to enhance fine details and remove face jitter.")
+        else:
+            self.options['pixel_loss'] = self.options.get('pixel_loss', False)
+            
+    #override
     def onInitialize(self, **in_options):
         exec(nnlib.import_all(), locals(), globals())        
         self.set_vram_batch_requirements( {2.5:2,3:2,4:2,4:4,5:8,6:12,7:16,8:16,9:24,10:24,11:32,12:32,13:48} )
                 
-        bgr_shape, mask_shape, self.encoder, self.decoder_src, self.decoder_dst = self.Build(self.created_vram_gb)
+        bgr_shape, mask_shape, self.encoder, self.decoder_src, self.decoder_dst = self.Build( self.options['lighter_ae'] )
         if not self.is_first_run():
             self.encoder.load_weights     (self.get_strpath_storage_for_file(self.encoderH5))
             self.decoder_src.load_weights (self.get_strpath_storage_for_file(self.decoder_srcH5))
@@ -33,7 +49,7 @@ class Model(ModelBase):
         self.ae = Model([input_src_bgr,input_src_mask,input_dst_bgr,input_dst_mask], [rec_src_bgr, rec_src_mask, rec_dst_bgr, rec_dst_mask] )
             
         self.ae.compile(optimizer=Adam(lr=5e-5, beta_1=0.5, beta_2=0.999),
-                        loss=[ DSSIMMaskLoss([input_src_mask]), 'mae', DSSIMMaskLoss([input_dst_mask]), 'mae' ] )
+                        loss=[ DSSIMMSEMaskLoss(input_src_mask, is_mse=self.options['pixel_loss']), 'mae', DSSIMMSEMaskLoss(input_dst_mask, is_mse=self.options['pixel_loss']), 'mae' ] )
   
         self.src_view = K.function([input_src_bgr],[rec_src_bgr, rec_src_mask])
         self.dst_view = K.function([input_dst_bgr],[rec_dst_bgr, rec_dst_mask])
@@ -62,7 +78,7 @@ class Model(ModelBase):
                                 [self.decoder_dst, self.get_strpath_storage_for_file(self.decoder_dstH5)]])
         
     #override
-    def onTrainOneEpoch(self, sample):
+    def onTrainOneEpoch(self, sample, generators_list):
         warped_src, target_src, target_src_mask = sample[0]
         warped_dst, target_dst, target_dst_mask = sample[1]    
 
@@ -120,7 +136,7 @@ class Model(ModelBase):
                                base_blur_mask_modifier=100,
                                **in_options)
     
-    def Build(self, created_vram_gb):
+    def Build(self, lighter_ae):
         exec(nnlib.code_import_all, locals(), globals())
         
         bgr_shape = (128, 128, 3)
@@ -139,7 +155,7 @@ class Model(ModelBase):
         def Encoder(input_shape):
             input_layer = Input(input_shape)
             x = input_layer
-            if created_vram_gb >= 5:
+            if not lighter_ae:
                 x = downscale(128)(x)
                 x = downscale(256)(x)
                 x = downscale(512)(x)
@@ -161,7 +177,7 @@ class Model(ModelBase):
             return Model(input_layer, x)
 
         def Decoder():
-            if created_vram_gb >= 5:
+            if not lighter_ae:
                 input_ = Input(shape=(16, 16, 512))
                 x = input_
                 x = upscale(512)(x)

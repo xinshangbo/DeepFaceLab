@@ -10,6 +10,8 @@ from pathlib import Path
 from utils import Path_utils
 from utils import image_utils
 from utils.DFLPNG import DFLPNG
+from utils.DFLJPG import DFLJPG
+from utils.cv2_utils import *
 from facelib import LandmarksProcessor
 from utils.SubprocessorBase import SubprocessorBase
 import multiprocessing
@@ -86,17 +88,24 @@ class BlurEstimatorSubprocessor(SubprocessorBase):
         
     #override
     def onClientProcessData(self, data):
-        filename_path = Path( data[0] )
-
-        dflpng = DFLPNG.load( str(filename_path), print_on_no_embedded_data=True )        
-        if dflpng is not None:
-            image = cv2.imread( str(filename_path) )
-            image = ( image * \
-                      LandmarksProcessor.get_image_hull_mask (image, dflpng.get_landmarks()) \
-                     ).astype(np.uint8)
-            return [ str(filename_path), estimate_sharpness( image ) ]
+        filepath = Path( data[0] )
+    
+        if filepath.suffix == '.png':
+            dflimg = DFLPNG.load( str(filepath), print_on_no_embedded_data=True )
+        elif filepath.suffix == '.jpg':
+            dflimg = DFLJPG.load ( str(filepath), print_on_no_embedded_data=True )
         else:
-            return [ str(filename_path), 0 ]
+            print ("%s is not a dfl image file" % (filepath.name) ) 
+            dflimg = None   
+            
+        if dflimg is not None:
+            image = cv2_imread( str(filepath) )
+            image = ( image * \
+                      LandmarksProcessor.get_image_hull_mask (image.shape, dflimg.get_landmarks()) \
+                     ).astype(np.uint8)
+            return [ str(filepath), estimate_sharpness( image ) ]
+        else:
+            return [ str(filepath), 0 ]
 
     #override
     def onClientGetDataName (self, data):
@@ -131,14 +140,14 @@ def sort_by_blur(input_path):
     
 def sort_by_brightness(input_path):
     print ("Sorting by brightness...")
-    img_list = [ [x, np.mean ( cv2.cvtColor(cv2.imread(x), cv2.COLOR_BGR2HSV)[...,2].flatten()  )] for x in tqdm( Path_utils.get_image_paths(input_path), desc="Loading") ]
+    img_list = [ [x, np.mean ( cv2.cvtColor(cv2_imread(x), cv2.COLOR_BGR2HSV)[...,2].flatten()  )] for x in tqdm( Path_utils.get_image_paths(input_path), desc="Loading", ascii=True) ]
     print ("Sorting...")
     img_list = sorted(img_list, key=operator.itemgetter(1), reverse=True)    
     return img_list
     
 def sort_by_hue(input_path):
     print ("Sorting by hue...")
-    img_list = [ [x, np.mean ( cv2.cvtColor(cv2.imread(x), cv2.COLOR_BGR2HSV)[...,0].flatten()  )] for x in tqdm( Path_utils.get_image_paths(input_path), desc="Loading") ]
+    img_list = [ [x, np.mean ( cv2.cvtColor(cv2_imread(x), cv2.COLOR_BGR2HSV)[...,0].flatten()  )] for x in tqdm( Path_utils.get_image_paths(input_path), desc="Loading", ascii=True) ]
     print ("Sorting...")
     img_list = sorted(img_list, key=operator.itemgetter(1), reverse=True)    
     return img_list
@@ -148,22 +157,22 @@ def sort_by_face(input_path):
     print ("Sorting by face similarity...")
 
     img_list = []
-    for filepath in tqdm( Path_utils.get_image_paths(input_path), desc="Loading"):
+    for filepath in tqdm( Path_utils.get_image_paths(input_path), desc="Loading", ascii=True):
         filepath = Path(filepath)
         
-        if filepath.suffix != '.png':
-            print ("%s is not a png file required for sort_by_face" % (filepath.name) ) 
+        if filepath.suffix == '.png':
+            dflimg = DFLPNG.load( str(filepath), print_on_no_embedded_data=True )
+        elif filepath.suffix == '.jpg':
+            dflimg = DFLJPG.load ( str(filepath), print_on_no_embedded_data=True )
+        else:
+            print ("%s is not a dfl image file" % (filepath.name) ) 
             continue
-        
-        dflpng = DFLPNG.load (str(filepath), print_on_no_embedded_data=True)
-        if dflpng is None:
-            continue
-        
-        img_list.append( [str(filepath), dflpng.get_landmarks()] )
+
+        img_list.append( [str(filepath), dflimg.get_landmarks()] )
         
 
     img_list_len = len(img_list)
-    for i in tqdm ( range(0, img_list_len-1), desc="Sorting"):
+    for i in tqdm ( range(0, img_list_len-1), desc="Sorting", ascii=True):
         min_score = float("inf")
         j_min_score = i+1
         for j in range(i+1,len(img_list)):
@@ -184,21 +193,21 @@ def sort_by_face_dissim(input_path):
     print ("Sorting by face dissimilarity...")
 
     img_list = []
-    for filepath in tqdm( Path_utils.get_image_paths(input_path), desc="Loading"):
+    for filepath in tqdm( Path_utils.get_image_paths(input_path), desc="Loading", ascii=True):
         filepath = Path(filepath)
         
-        if filepath.suffix != '.png':
-            print ("%s is not a png file required for sort_by_face_dissim" % (filepath.name) ) 
-            continue
+        if filepath.suffix == '.png':
+            dflimg = DFLPNG.load( str(filepath), print_on_no_embedded_data=True )
+        elif filepath.suffix == '.jpg':
+            dflimg = DFLJPG.load ( str(filepath), print_on_no_embedded_data=True )
+        else:
+            print ("%s is not a dfl image file" % (filepath.name) ) 
+            continue 
         
-        dflpng = DFLPNG.load (str(filepath), print_on_no_embedded_data=True)
-        if dflpng is None:
-            continue
-        
-        img_list.append( [str(filepath), dflpng.get_landmarks(), 0 ] )
+        img_list.append( [str(filepath), dflimg.get_landmarks(), 0 ] )
         
     img_list_len = len(img_list)
-    for i in tqdm( range(0, img_list_len-1), desc="Sorting"):
+    for i in tqdm( range(0, img_list_len-1), desc="Sorting", ascii=True):
         score_total = 0
         for j in range(i+1,len(img_list)):
             if i == j:
@@ -217,18 +226,43 @@ def sort_by_face_dissim(input_path):
 def sort_by_face_yaw(input_path):
     print ("Sorting by face yaw...")
     img_list = []
-    for filepath in tqdm( Path_utils.get_image_paths(input_path), desc="Loading"):
+    for filepath in tqdm( Path_utils.get_image_paths(input_path), desc="Loading", ascii=True):
         filepath = Path(filepath)
         
-        if filepath.suffix != '.png':
-            print ("%s is not a png file required for sort_by_face_dissim" % (filepath.name) ) 
+        if filepath.suffix == '.png':
+            dflimg = DFLPNG.load( str(filepath), print_on_no_embedded_data=True )
+        elif filepath.suffix == '.jpg':
+            dflimg = DFLJPG.load ( str(filepath), print_on_no_embedded_data=True )
+        else:
+            print ("%s is not a dfl image file" % (filepath.name) ) 
             continue
         
-        dflpng = DFLPNG.load (str(filepath), print_on_no_embedded_data=True)
-        if dflpng is None:
+        pitch, yaw = LandmarksProcessor.estimate_pitch_yaw ( dflimg.get_landmarks() )
+       
+        img_list.append( [str(filepath), yaw ] )
+
+    print ("Sorting...")
+    img_list = sorted(img_list, key=operator.itemgetter(1), reverse=True)
+    
+    return img_list
+    
+def sort_by_face_pitch(input_path):
+    print ("Sorting by face pitch...")
+    img_list = []
+    for filepath in tqdm( Path_utils.get_image_paths(input_path), desc="Loading", ascii=True):
+        filepath = Path(filepath)
+        
+        if filepath.suffix == '.png':
+            dflimg = DFLPNG.load( str(filepath), print_on_no_embedded_data=True )
+        elif filepath.suffix == '.jpg':
+            dflimg = DFLJPG.load ( str(filepath), print_on_no_embedded_data=True )
+        else:
+            print ("%s is not a dfl image file" % (filepath.name) ) 
             continue
         
-        img_list.append( [str(filepath), np.array( dflpng.get_yaw_value() ) ] )
+        pitch, yaw = LandmarksProcessor.estimate_pitch_yaw ( dflimg.get_landmarks() )
+       
+        img_list.append( [str(filepath), pitch ] )
 
     print ("Sorting...")
     img_list = sorted(img_list, key=operator.itemgetter(1), reverse=True)
@@ -308,7 +342,7 @@ class HistSsimSubprocessor(SubprocessorBase):
 
         img_list = []
         for x in data:
-            img = cv2.imread(x)    
+            img = cv2_imread(x)    
             img_list.append ([x, cv2.calcHist([img], [0], None, [256], [0, 256]),
                                  cv2.calcHist([img], [1], None, [256], [0, 256]),
                                  cv2.calcHist([img], [2], None, [256], [0, 256])
@@ -436,15 +470,22 @@ def sort_by_hist_dissim(input_path):
     print ("Sorting by histogram dissimilarity...")
 
     img_list = []
-    for filename_path in tqdm( Path_utils.get_image_paths(input_path), desc="Loading"):
-        image = cv2.imread(filename_path)
+    for filepath in tqdm( Path_utils.get_image_paths(input_path), desc="Loading", ascii=True):
+        filepath = Path(filepath)
         
-        dflpng = DFLPNG.load( str(filename_path) )
-        if dflpng is not None:        
-            face_mask = LandmarksProcessor.get_image_hull_mask (image, dflpng.get_landmarks())
-            image = (image*face_mask).astype(np.uint8)
+        if filepath.suffix == '.png':
+            dflimg = DFLPNG.load( str(filepath), print_on_no_embedded_data=True )
+        elif filepath.suffix == '.jpg':
+            dflimg = DFLJPG.load ( str(filepath), print_on_no_embedded_data=True )
+        else:
+            print ("%s is not a dfl image file" % (filepath.name) ) 
+            continue
+            
+        image = cv2_imread(str(filepath))
+        face_mask = LandmarksProcessor.get_image_hull_mask (image.shape, dflimg.get_landmarks())
+        image = (image*face_mask).astype(np.uint8)
 
-        img_list.append ([filename_path, cv2.calcHist([cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)], [0], None, [256], [0, 256]), 0 ])
+        img_list.append ([str(filepath), cv2.calcHist([cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)], [0], None, [256], [0, 256]), 0 ])
 
     img_list = HistDissimSubprocessor(img_list).process()
                          
@@ -512,26 +553,29 @@ class FinalLoaderSubprocessor(SubprocessorBase):
         filepath = Path(data[0])     
 
         try:
-            if filepath.suffix != '.png':
-                raise Exception ("%s is not a png file required for sort_final" % (filepath.name) ) 
+            if filepath.suffix == '.png':
+                dflimg = DFLPNG.load( str(filepath), print_on_no_embedded_data=True )
+            elif filepath.suffix == '.jpg':
+                dflimg = DFLJPG.load( str(filepath), print_on_no_embedded_data=True )
+            else:
+                print ("%s is not a dfl image file" % (filepath.name) ) 
+                raise Exception("")
             
-            dflpng = DFLPNG.load (str(filepath), print_on_no_embedded_data=True)
-            if dflpng is None:
-                raise Exception ("")
-            
-            bgr = cv2.imread(str(filepath))
+            bgr = cv2_imread(str(filepath))
             if bgr is None:
                 raise Exception ("Unable to load %s" % (filepath.name) ) 
                 
             gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)        
-            gray_masked = ( gray * LandmarksProcessor.get_image_hull_mask (bgr, dflpng.get_landmarks() )[:,:,0] ).astype(np.uint8)
+            gray_masked = ( gray * LandmarksProcessor.get_image_hull_mask (bgr.shape, dflimg.get_landmarks() )[:,:,0] ).astype(np.uint8)
             sharpness = estimate_sharpness(gray_masked)
-            hist = cv2.calcHist([gray], [0], None, [256], [0, 256])   
+            pitch, yaw = LandmarksProcessor.estimate_pitch_yaw ( dflimg.get_landmarks() )
+            
+            hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
         except Exception as e:
             print (e)
             return [ 1, [str(filepath)] ]
             
-        return [ 0, [str(filepath), sharpness, hist, dflpng.get_yaw_value() ] ]
+        return [ 0, [str(filepath), sharpness, hist, yaw ] ]
         
 
     #override
@@ -560,10 +604,10 @@ def sort_final(input_path):
     grads = 128
     imgs_per_grad = 15 
 
-    grads_space = np.linspace (-255,255,grads)
+    grads_space = np.linspace (-1.0,1.0,grads)
     
     yaws_sample_list = [None]*grads
-    for g in tqdm ( range(grads), desc="Sort by yaw" ):    
+    for g in tqdm ( range(grads), desc="Sort by yaw", ascii=True ):    
         yaw = grads_space[g]
         next_yaw = grads_space[g+1] if g < grads-1 else yaw
         
@@ -578,7 +622,7 @@ def sort_final(input_path):
             yaws_sample_list[g] = yaw_samples
     
     total_lack = 0
-    for g in tqdm ( range (grads), desc="" ):
+    for g in tqdm ( range (grads), desc="", ascii=True ):
         img_list = yaws_sample_list[g]
         img_list_len = len(img_list) if img_list is not None else 0
         
@@ -588,7 +632,7 @@ def sort_final(input_path):
     imgs_per_grad += total_lack // grads
     sharpned_imgs_per_grad = imgs_per_grad*10
     
-    for g in tqdm ( range (grads), desc="Sort by blur" ):
+    for g in tqdm ( range (grads), desc="Sort by blur", ascii=True ):
         img_list = yaws_sample_list[g]
         if img_list is None:
             continue
@@ -605,7 +649,7 @@ def sort_final(input_path):
             
         yaws_sample_list[g] = img_list
             
-    for g in tqdm ( range (grads), desc="Sort by hist" ):
+    for g in tqdm ( range (grads), desc="Sort by hist", ascii=True ):
         img_list = yaws_sample_list[g]
         if img_list is None:
             continue
@@ -620,7 +664,7 @@ def sort_final(input_path):
             
         yaws_sample_list[g] = sorted(img_list, key=operator.itemgetter(3), reverse=True)    
 
-    for g in tqdm ( range (grads), desc="Fetching best" ):
+    for g in tqdm ( range (grads), desc="Fetching best", ascii=True ):
         img_list = yaws_sample_list[g]
         if img_list is None:
             continue
@@ -634,8 +678,8 @@ def sort_by_black(input_path):
     print ("Sorting by amount of black pixels...")
 
     img_list = []
-    for x in tqdm( Path_utils.get_image_paths(input_path), desc="Loading"):
-        img = cv2.imread(x)
+    for x in tqdm( Path_utils.get_image_paths(input_path), desc="Loading", ascii=True):
+        img = cv2_imread(x)
         img_list.append ([x, img[(img == 0)].size ])
 
     print ("Sorting...")
@@ -654,7 +698,7 @@ def final_process(input_path, img_list, trash_img_list):
         for filename in Path_utils.get_image_paths(trash_path):
             Path(filename).unlink()
 
-        for i in tqdm( range(len(trash_img_list)), desc="Moving trash" , leave=False):
+        for i in tqdm( range(len(trash_img_list)), desc="Moving trash" , leave=False, ascii=True):
             src = Path (trash_img_list[i][0])        
             dst = trash_path / src.name
             try:
@@ -664,7 +708,7 @@ def final_process(input_path, img_list, trash_img_list):
                 
         print ("")
         
-    for i in tqdm( range(len(img_list)), desc="Renaming" , leave=False):
+    for i in tqdm( range(len(img_list)), desc="Renaming" , leave=False, ascii=True):
         src = Path (img_list[i][0])        
         dst = input_path / ('%.5d_%s' % (i, src.name ))
         try:
@@ -672,7 +716,7 @@ def final_process(input_path, img_list, trash_img_list):
         except:
             print ('fail to rename %s' % (src.name) )
             
-    for i in tqdm( range(len(img_list)) , desc="Renaming" ):
+    for i in tqdm( range(len(img_list)) , desc="Renaming", ascii=True ):
         src = Path (img_list[i][0])
         
         src = input_path / ('%.5d_%s' % (i, src.name))
@@ -686,23 +730,23 @@ def sort_by_origname(input_path):
     print ("Sort by original filename...")
     
     img_list = []
-    for filepath in tqdm( Path_utils.get_image_paths(input_path), desc="Loading"):
+    for filepath in tqdm( Path_utils.get_image_paths(input_path), desc="Loading", ascii=True):
         filepath = Path(filepath)
         
-        if filepath.suffix != '.png':
-            print ("%s is not a png file required for sort_by_origname" % (filepath.name) ) 
-            continue
-        
-        dflpng = DFLPNG.load (str(filepath), print_on_no_embedded_data=True)
-        if dflpng is None:
+        if filepath.suffix == '.png':
+            dflimg = DFLPNG.load( str(filepath), print_on_no_embedded_data=True )
+        elif filepath.suffix == '.jpg':
+            dflimg = DFLJPG.load( str(filepath), print_on_no_embedded_data=True )
+        else:
+            print ("%s is not a dfl image file" % (filepath.name) ) 
             continue
 
-        img_list.append( [str(filepath), dflpng.get_source_filename()] )
+        img_list.append( [str(filepath), dflimg.get_source_filename()] )
 
     print ("Sorting...")
     img_list = sorted(img_list, key=operator.itemgetter(1))
     return img_list
-    
+
 def main (input_path, sort_by_method):
     input_path = Path(input_path)
     sort_by_method = sort_by_method.lower()
@@ -715,6 +759,7 @@ def main (input_path, sort_by_method):
     elif sort_by_method == 'face':          img_list = sort_by_face (input_path)
     elif sort_by_method == 'face-dissim':   img_list = sort_by_face_dissim (input_path)
     elif sort_by_method == 'face-yaw':      img_list = sort_by_face_yaw (input_path)
+    elif sort_by_method == 'face-pitch':    img_list = sort_by_face_pitch (input_path)
     elif sort_by_method == 'hist':          img_list = sort_by_hist (input_path)
     elif sort_by_method == 'hist-dissim':   img_list = sort_by_hist_dissim (input_path)
     elif sort_by_method == 'brightness':    img_list = sort_by_brightness (input_path)

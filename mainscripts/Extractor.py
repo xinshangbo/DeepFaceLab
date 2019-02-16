@@ -3,15 +3,16 @@ import os
 import sys
 import time
 import multiprocessing
-from tqdm import tqdm
 from pathlib import Path
 import numpy as np
 import cv2
 from utils import Path_utils
-from utils.DFLPNG import DFLPNG
+from utils.DFLJPG import DFLJPG
+from utils.cv2_utils import *
 from utils import image_utils
+import facelib
 from facelib import FaceType
-import facelib 
+from facelib import LandmarksProcessor
 from nnlib import nnlib
 
 from utils.SubprocessorBase import SubprocessorBase
@@ -45,12 +46,13 @@ class ExtractSubprocessor(SubprocessorBase):
             self.param_x = -1
             self.param_y = -1
             self.param_rect_size = -1
-            self.param = {'x': 0, 'y': 0, 'rect_size' : 5, 'rect_locked' : False, 'redraw_needed' : False }
+            self.param = {'x': 0, 'y': 0, 'rect_size' : 100, 'rect_locked' : False, 'redraw_needed' : False }
             
             def onMouse(event, x, y, flags, param):        
                 if event == cv2.EVENT_MOUSEWHEEL:
-                    mod = 1 if flags > 0 else -1            
-                    param['rect_size'] = max (5, param['rect_size'] + 10*mod)
+                    mod = 1 if flags > 0 else -1 
+                    diff = 1 if param['rect_size'] <= 40 else np.clip(param['rect_size'] / 10, 1, 10)
+                    param['rect_size'] = max (5, param['rect_size'] + diff*mod)                    
                 elif event == cv2.EVENT_LBUTTONDOWN:
                     param['rect_locked'] = not param['rect_locked']
                     param['redraw_needed'] = True
@@ -62,10 +64,15 @@ class ExtractSubprocessor(SubprocessorBase):
     
     def get_devices_for_type (self, type, multi_gpu):
         if (type == 'rects' or type == 'landmarks'):
-            if not multi_gpu:            
-                devices = [nnlib.device.getBestDeviceIdx()]
-            else:
+            if multi_gpu:
                 devices = nnlib.device.getDevicesWithAtLeastTotalMemoryGB(2)
+            
+            if not multi_gpu or len(devices) == 0:
+                devices = [nnlib.device.getBestDeviceIdx()]
+                
+            if len(devices) == 0:
+                devices = [0]
+                    
             devices = [ (idx, nnlib.device.getDeviceName(idx), nnlib.device.getDeviceVRAMTotalGb(idx) ) for idx in devices]
 
         elif type == 'final':
@@ -82,20 +89,7 @@ class ExtractSubprocessor(SubprocessorBase):
                      'output_dir': str(self.output_path), 
                      'detector': self.detector}
     
-        if self.cpu_only:         
-            num_processes = 1
-            if not self.manual and self.type == 'rects' and self.detector == 'mt':
-                num_processes = int ( max (1, multiprocessing.cpu_count() / 2 ) )
-            
-            for i in range(0, num_processes ):
-                client_dict = base_dict.copy()
-                client_dict['device_idx'] = 0
-                client_dict['device_name'] = 'CPU' if num_processes == 1 else 'CPU #%d' % (i),
-                client_dict['device_type'] = 'CPU'
-                
-                yield client_dict['device_name'], {}, client_dict
-        
-        else:
+        if not self.cpu_only:
             for (device_idx, device_name, device_total_vram_gb) in self.get_devices_for_type(self.type, self.multi_gpu): 
                 num_processes = 1
                 if not self.manual and self.type == 'rects' and self.detector == 'mt':
@@ -108,6 +102,18 @@ class ExtractSubprocessor(SubprocessorBase):
                     client_dict['device_type'] = 'GPU'
                     
                     yield client_dict['device_name'], {}, client_dict
+        else:
+            num_processes = 1
+            if not self.manual and self.type == 'rects' and self.detector == 'mt':
+                num_processes = int ( max (1, multiprocessing.cpu_count() / 2 ) )
+            
+            for i in range(0, num_processes ):
+                client_dict = base_dict.copy()
+                client_dict['device_idx'] = 0
+                client_dict['device_name'] = 'CPU' if num_processes == 1 else 'CPU #%d' % (i),
+                client_dict['device_type'] = 'CPU'
+                
+                yield client_dict['device_name'], {}, client_dict
                     
     #override
     def get_no_process_started_message(self):
@@ -143,15 +149,17 @@ class ExtractSubprocessor(SubprocessorBase):
                     allow_remark_faces = False
                     # If there was already a face then lock the rectangle to it until the mouse is clicked
                     if len(faces) > 0:
-                        prev_rect = faces.pop()[0]
+                        self.rect, self.landmarks = faces.pop()
+                        
                         self.param['rect_locked'] = True
                         faces.clear()
-                        self.param['rect_size'] = ( prev_rect[2] - prev_rect[0] ) / 2
-                        self.param['x'] = ( ( prev_rect[0] + prev_rect[2] ) / 2 ) * self.view_scale
-                        self.param['y'] = ( ( prev_rect[1] + prev_rect[3] ) / 2 ) * self.view_scale
+                        self.param['rect_size'] = ( self.rect[2] - self.rect[0] ) / 2
+                        self.param['x'] = ( ( self.rect[0] + self.rect[2] ) / 2 ) * self.view_scale
+                        self.param['y'] = ( ( self.rect[1] + self.rect[3] ) / 2 ) * self.view_scale
+                        
 
                 if len(faces) == 0:
-                    self.original_image = cv2.imread(filename)
+                    self.original_image = cv2_imread(filename)
                     
                     (h,w,c) = self.original_image.shape
  
@@ -161,8 +169,8 @@ class ExtractSubprocessor(SubprocessorBase):
                     
                     self.text_lines_img = (image_utils.get_draw_text_lines ( self.original_image, (0,0, self.original_image.shape[1], min(100, self.original_image.shape[0]) ),
                                                     [   'Match landmarks with face exactly. Click to confirm/unconfirm selection',
-                                                        '[Enter] - confirm and continue to next unmarked frame',
-                                                        '[Space] - skip to next unmarked frame',
+                                                        '[Enter] - confirm face landmarks and continue',
+                                                        '[Space] - confirm as unmarked frame and continue',
                                                         '[Mouse wheel] - change rect',
                                                         '[,] [.]- prev frame, next frame',
                                                         '[Q] - skip remaining frames'
@@ -195,12 +203,9 @@ class ExtractSubprocessor(SubprocessorBase):
                             skip_remaining = True
                             break
                             
-                        new_param_x = self.param['x'] / self.view_scale
-                        new_param_y = self.param['y'] / self.view_scale
-                        new_param_rect_size = self.param['rect_size']
-                        
-                        new_param_x = np.clip (new_param_x, 0, w-1)
-                        new_param_y = np.clip (new_param_y, 0, h-1)
+                        new_param_x = np.clip (self.param['x'], 0, w-1) / self.view_scale
+                        new_param_y = np.clip (self.param['y'], 0, h-1) / self.view_scale
+                        new_param_rect_size = self.param['rect_size']                        
                                 
                         if self.param_x != new_param_x or \
                            self.param_y != new_param_y or \
@@ -234,6 +239,8 @@ class ExtractSubprocessor(SubprocessorBase):
                     self.param['redraw_needed'] = True
                     self.param['rect_locked'] = False
                 elif skip_remaining:
+                    if self.param['rect_locked']:
+                        faces.append ( [(self.rect), self.landmarks] )
                     while len(self.input_data) > 0:
                         self.result.append( self.input_data.pop(0) )
                         self.inc_progress_bar(1)
@@ -259,7 +266,7 @@ class ExtractSubprocessor(SubprocessorBase):
 
         self.e = None
 
-        device_config = nnlib.DeviceConfig ( cpu_only=self.cpu_only, force_best_gpu_idx=self.device_idx, allow_growth=True)
+        device_config = nnlib.DeviceConfig ( cpu_only=self.cpu_only, force_gpu_idx=self.device_idx, allow_growth=True)
         if self.type == 'rects':
             if self.detector is not None:
                 if self.detector == 'mt':
@@ -289,9 +296,9 @@ class ExtractSubprocessor(SubprocessorBase):
     def onClientProcessData(self, data):
         filename_path = Path( data[0] )
 
-        image = cv2.imread( str(filename_path) )
+        image = cv2_imread( str(filename_path) )
         if image is None:
-            print ( 'Failed to extract %s, reason: cv2.imread() fail.' % ( str(filename_path) ) )
+            print ( 'Failed to extract %s, reason: cv2_imread() fail.' % ( str(filename_path) ) )
         else:
             if self.type == 'rects':
                 rects = self.e.extract_from_bgr (image)
@@ -307,32 +314,30 @@ class ExtractSubprocessor(SubprocessorBase):
                 faces = data[1]
                 
                 if self.debug:
-                    debug_output_file = '{}_{}'.format( str(Path(str(self.output_path) + '_debug') / filename_path.stem),  'debug.png')
+                    debug_output_file = '{}{}'.format( str(Path(str(self.output_path) + '_debug') / filename_path.stem),  '.jpg')
                     debug_image = image.copy()
                     
                 for (face_idx, face) in enumerate(faces):         
-                    output_file = '{}_{}{}'.format(str(self.output_path / filename_path.stem), str(face_idx), '.png')
+                    output_file = '{}_{}{}'.format(str(self.output_path / filename_path.stem), str(face_idx), '.jpg')
                     
                     rect = face[0]
                     image_landmarks = np.array(face[1])
 
                     if self.debug:
-                        facelib.LandmarksProcessor.draw_rect_landmarks (debug_image, rect, image_landmarks, self.image_size, self.face_type)
+                        LandmarksProcessor.draw_rect_landmarks (debug_image, rect, image_landmarks, self.image_size, self.face_type)
 
                     if self.face_type == FaceType.MARK_ONLY:                        
                         face_image = image
                         face_image_landmarks = image_landmarks
                     else:
-                        image_to_face_mat = facelib.LandmarksProcessor.get_transform_mat (image_landmarks, self.image_size, self.face_type)       
+                        image_to_face_mat = LandmarksProcessor.get_transform_mat (image_landmarks, self.image_size, self.face_type)       
                         face_image = cv2.warpAffine(image, image_to_face_mat, (self.image_size, self.image_size), cv2.INTER_LANCZOS4)
-                        face_image_landmarks = facelib.LandmarksProcessor.transform_points (image_landmarks, image_to_face_mat)
+                        face_image_landmarks = LandmarksProcessor.transform_points (image_landmarks, image_to_face_mat)
                     
-                    cv2.imwrite(output_file, face_image)
+                    cv2_imwrite(output_file, face_image, [int(cv2.IMWRITE_JPEG_QUALITY), 85] )
 
-                    DFLPNG.embed_data(output_file, face_type = FaceType.toString(self.face_type),
+                    DFLJPG.embed_data(output_file, face_type = FaceType.toString(self.face_type),
                                                    landmarks = face_image_landmarks.tolist(),
-                                                   yaw_value = facelib.LandmarksProcessor.calc_face_yaw (face_image_landmarks),
-                                                   pitch_value = facelib.LandmarksProcessor.calc_face_pitch (face_image_landmarks),
                                                    source_filename = filename_path.name,
                                                    source_rect=  rect,
                                                    source_landmarks = image_landmarks.tolist()
@@ -341,7 +346,7 @@ class ExtractSubprocessor(SubprocessorBase):
                     result.append (output_file)
                     
                 if self.debug:
-                    cv2.imwrite(debug_output_file, debug_image )
+                    cv2_imwrite(debug_output_file, debug_image, [int(cv2.IMWRITE_JPEG_QUALITY), 50] )
                     
                 return result       
         return None
@@ -356,13 +361,31 @@ class ExtractSubprocessor(SubprocessorBase):
         if self.manual == True:
             self.landmarks = result[1][0][1]
                                         
-            image = cv2.addWeighted (self.original_image,1.0,self.text_lines_img,1.0,0)                    
+            (h,w,c) = self.original_image.shape
+            image = cv2.addWeighted (self.original_image,1.0,self.text_lines_img,1.0,0)                                
             view_rect = (np.array(self.rect) * self.view_scale).astype(np.int).tolist()
             view_landmarks  = (np.array(self.landmarks) * self.view_scale).astype(np.int).tolist()
-            facelib.LandmarksProcessor.draw_rect_landmarks (image, view_rect, view_landmarks, self.image_size, self.face_type)
+            
+            if self.param_rect_size <= 40:
+                scaled_rect_size = h // 3 if w > h else w // 3
+
+                p1 = (self.param_x - self.param_rect_size, self.param_y - self.param_rect_size)
+                p2 = (self.param_x + self.param_rect_size, self.param_y - self.param_rect_size)
+                p3 = (self.param_x - self.param_rect_size, self.param_y + self.param_rect_size)
+                
+                wh = h if h < w else w                
+                np1 = (w / 2 - wh / 4, h / 2 - wh / 4)
+                np2 = (w / 2 + wh / 4, h / 2 - wh / 4)
+                np3 = (w / 2 - wh / 4, h / 2 + wh / 4)
+                
+                mat = cv2.getAffineTransform( np.float32([p1,p2,p3])*self.view_scale, np.float32([np1,np2,np3]) )
+                image = cv2.warpAffine(image, mat,(w,h) )                
+                view_landmarks = LandmarksProcessor.transform_points (view_landmarks, mat)
+     
+            LandmarksProcessor.draw_rect_landmarks (image, view_rect, view_landmarks, self.image_size, self.face_type)
 
             if self.param['rect_locked']:
-                facelib.draw_landmarks(image, view_landmarks, (255,255,0) )
+                LandmarksProcessor.draw_landmarks(image, view_landmarks, (255,255,0) )
             self.param['redraw_needed'] = False
             
             cv2.imshow (self.wnd_name, image)
@@ -383,6 +406,69 @@ class ExtractSubprocessor(SubprocessorBase):
             cv2.destroyAllWindows()
         return self.result
 
+class DeletedFilesSearcherSubprocessor(SubprocessorBase):
+    #override
+    def __init__(self, input_paths, debug_paths ): 
+        self.input_paths = input_paths
+        self.debug_paths_stems = [ Path(d).stem for d in debug_paths]        
+        self.result = []
+        super().__init__('DeletedFilesSearcherSubprocessor', 60)           
+        
+    #override
+    def process_info_generator(self):    
+        for i in range(0, min(multiprocessing.cpu_count(), 8) ):
+            yield 'CPU%d' % (i), {}, {'device_idx': i,
+                                      'device_name': 'CPU%d' % (i), 
+                                      'debug_paths_stems' : self.debug_paths_stems
+                                      }
+
+    #override
+    def get_no_process_started_message(self):
+        print ( 'Unable to start CPU processes.')
+        
+    #override
+    def onHostGetProgressBarDesc(self):
+        return "Searching deleted files"
+        
+    #override
+    def onHostGetProgressBarLen(self):
+        return len (self.input_paths)
+        
+    #override
+    def onHostGetData(self, host_dict):
+        if len (self.input_paths) > 0:        
+            return [self.input_paths.pop(0)]        
+        return None
+    
+    #override
+    def onHostDataReturn (self, host_dict, data):
+        self.input_paths.insert(0, data[0])   
+        
+    #override
+    def onClientInitialize(self, client_dict):
+        self.debug_paths_stems = client_dict['debug_paths_stems']
+        return None
+
+    #override
+    def onClientProcessData(self, data):  
+        input_path_stem = Path(data[0]).stem        
+        return any ( [ input_path_stem == d_stem for d_stem in self.debug_paths_stems] )
+
+    #override
+    def onClientGetDataName (self, data):
+        #return string identificator of your data
+        return data[0]
+        
+    #override
+    def onHostResult (self, host_dict, data, result):
+        if result == False:
+            self.result.append( data[0] )
+        return 1
+
+    #override
+    def onFinalizeAndGetResult(self):
+        return self.result
+        
 '''
 detector
     'dlib'
@@ -393,7 +479,7 @@ face_type
     'full_face'
     'avatar'
 '''
-def main (input_dir, output_dir, debug, detector='mt', multi_gpu=True, cpu_only=False, manual_fix=False, manual_window_size=0, image_size=256, face_type='full_face'):
+def main (input_dir, output_dir, debug, detector='mt', multi_gpu=True, cpu_only=False, manual_fix=False, manual_output_debug_fix=False, manual_window_size=1368, image_size=256, face_type='full_face'):
     print ("Running extractor.\r\n")
 
     input_path = Path(input_dir)
@@ -405,20 +491,36 @@ def main (input_dir, output_dir, debug, detector='mt', multi_gpu=True, cpu_only=
         return
         
     if output_path.exists():
-        for filename in Path_utils.get_image_paths(output_path):
-            Path(filename).unlink()
+        if not manual_output_debug_fix:
+            for filename in Path_utils.get_image_paths(output_path):
+                Path(filename).unlink()
     else:
         output_path.mkdir(parents=True, exist_ok=True)
         
+    if manual_output_debug_fix:
+        debug = True
+        detector = 'manual'
+        print('Performing re-extract frames which were deleted from _debug directory.')
+        
+    input_path_image_paths = Path_utils.get_image_unique_filestem_paths(input_path, verbose=True)
+    
     if debug:
         debug_output_path = Path(str(output_path) + '_debug')
-        if debug_output_path.exists():
-            for filename in Path_utils.get_image_paths(debug_output_path):
-                Path(filename).unlink()
+        
+        if manual_output_debug_fix:
+            if not debug_output_path.exists():
+                print ("%s not found " % ( str(debug_output_path) ))
+                return
+            
+            input_path_image_paths = DeletedFilesSearcherSubprocessor ( input_path_image_paths, Path_utils.get_image_paths(debug_output_path) ).process()
+            input_path_image_paths = sorted (input_path_image_paths)            
         else:
-            debug_output_path.mkdir(parents=True, exist_ok=True)
+            if debug_output_path.exists():
+                for filename in Path_utils.get_image_paths(debug_output_path):
+                    Path(filename).unlink()
+            else:
+                debug_output_path.mkdir(parents=True, exist_ok=True)
 
-    input_path_image_paths = Path_utils.get_image_unique_filestem_paths(input_path, verbose=True)
     images_found = len(input_path_image_paths)
     faces_detected = 0
     if images_found != 0:    

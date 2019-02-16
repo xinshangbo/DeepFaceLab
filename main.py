@@ -38,6 +38,7 @@ if __name__ == "__main__":
             multi_gpu=arguments.multi_gpu,
             cpu_only=arguments.cpu_only,
             manual_fix=arguments.manual_fix,
+            manual_output_debug_fix=arguments.manual_output_debug_fix,
             manual_window_size=arguments.manual_window_size
             )
         
@@ -49,10 +50,9 @@ if __name__ == "__main__":
     extract_parser.add_argument('--detector', dest="detector", choices=['dlib','mt','manual'], default='dlib', help="Type of detector. Default 'dlib'. 'mt' (MTCNNv1) - faster, better, almost no jitter, perfect for gathering thousands faces for src-set. It is also good for dst-set, but can generate false faces in frames where main face not recognized! In this case for dst-set use either 'dlib' with '--manual-fix' or '--detector manual'. Manual detector suitable only for dst-set.")
     extract_parser.add_argument('--multi-gpu', action="store_true", dest="multi_gpu", default=False, help="Enables multi GPU.")
     extract_parser.add_argument('--manual-fix', action="store_true", dest="manual_fix", default=False, help="Enables manual extract only frames where faces were not recognized.")
-    extract_parser.add_argument('--manual-window-size', type=int, dest="manual_window_size", default=0, help="Manual fix window size. Example: 1368. Default: frame size.") 
+    extract_parser.add_argument('--manual-output-debug-fix', action="store_true", dest="manual_output_debug_fix", default=False, help="Performs manual reextract input-dir frames which were deleted from [output_dir]_debug\ dir.")
+    extract_parser.add_argument('--manual-window-size', type=int, dest="manual_window_size", default=1368, help="Manual fix window size. Default: 1368.") 
     extract_parser.add_argument('--cpu-only', action="store_true", dest="cpu_only", default=False, help="Extract on CPU. Forces to use MT extractor.")    
-    
-    
     extract_parser.set_defaults (func=process_extract)
     
     def process_sort(arguments):        
@@ -61,20 +61,25 @@ if __name__ == "__main__":
         
     sort_parser = subparsers.add_parser( "sort", help="Sort faces in a directory.")     
     sort_parser.add_argument('--input-dir', required=True, action=fixPathAction, dest="input_dir", help="Input directory. A directory containing the files you wish to process.")
-    sort_parser.add_argument('--by', required=True, dest="sort_by_method", choices=("blur", "face", "face-dissim", "face-yaw", "hist", "hist-dissim", "brightness", "hue", "black", "origname", "final"), help="Method of sorting. 'origname' sort by original filename to recover original sequence." )
+    sort_parser.add_argument('--by', required=True, dest="sort_by_method", choices=("blur", "face", "face-dissim", "face-yaw", "face-pitch", "hist", "hist-dissim", "brightness", "hue", "black", "origname", "final", "test"), help="Method of sorting. 'origname' sort by original filename to recover original sequence." )
     sort_parser.set_defaults (func=process_sort)
     
+    def process_util(arguments):        
+        from mainscripts import Util
+        
+        if arguments.convert_png_to_jpg:
+            Util.convert_png_to_jpg_folder (input_path=arguments.input_dir)
+        
+        if arguments.add_landmarks_debug_images:
+            Util.add_landmarks_debug_images (input_path=arguments.input_dir)
+        
+    util_parser = subparsers.add_parser( "util", help="Utilities.")     
+    util_parser.add_argument('--input-dir', required=True, action=fixPathAction, dest="input_dir", help="Input directory. A directory containing the files you wish to process.")
+    util_parser.add_argument('--convert-png-to-jpg', action="store_true", dest="convert_png_to_jpg", default=False, help="Convert DeepFaceLAB PNG files to JPEG.")
+    util_parser.add_argument('--add-landmarks-debug-images', action="store_true", dest="add_landmarks_debug_images", default=False, help="Add landmarks debug image for aligned faces.")
+    util_parser.set_defaults (func=process_util)
+    
     def process_train(arguments):      
-    
-        if 'DFL_TARGET_EPOCH' in os.environ.keys():
-            arguments.session_target_epoch = int ( os.environ['DFL_TARGET_EPOCH'] )
-    
-        if 'DFL_BATCH_SIZE' in os.environ.keys():
-            arguments.batch_size = int ( os.environ['DFL_BATCH_SIZE'] )
-
-        if 'DFL_WORST_GPU' in os.environ.keys():
-            arguments.choose_worst_gpu = True
-            
         from mainscripts import Trainer
         Trainer.main (
             training_data_src_dir=arguments.training_data_src_dir, 
@@ -83,10 +88,8 @@ if __name__ == "__main__":
             model_name=arguments.model_name,
             debug              = arguments.debug,
             #**options
-            choose_worst_gpu   = arguments.choose_worst_gpu,
-            force_best_gpu_idx = arguments.force_best_gpu_idx,
-            force_gpu_idxs     = arguments.force_gpu_idxs,
-            cpu_only           = arguments.cpu_only
+            force_gpu_idx = arguments.force_gpu_idx,
+            cpu_only      = arguments.cpu_only
             )
         
     train_parser = subparsers.add_parser( "train", help="Trainer") 
@@ -96,9 +99,7 @@ if __name__ == "__main__":
     train_parser.add_argument('--model', required=True, dest="model_name", choices=Path_utils.get_all_dir_names_startswith ( Path(__file__).parent / 'models' , 'Model_'), help="Type of model")
     train_parser.add_argument('--debug', action="store_true", dest="debug", default=False, help="Debug samples.")  
     train_parser.add_argument('--cpu-only', action="store_true", dest="cpu_only", default=False, help="Train on CPU.")
-    train_parser.add_argument('--force-gpu-idxs', type=str, dest="force_gpu_idxs", default=None, help="Override final GPU idxs. Example: 0,1,2.")
-    train_parser.add_argument('--choose-worst-gpu', action="store_true", dest="choose_worst_gpu", default=False, help="Choose worst GPU instead of best. Environment variable to force True: DFL_WORST_GPU")
-    train_parser.add_argument('--force-best-gpu-idx', type=int, dest="force_best_gpu_idx", default=-1, help="Force to choose this GPU idx as best(worst).")
+    train_parser.add_argument('--force-gpu-idx', type=int, dest="force_gpu_idx", default=-1, help="Force to choose this GPU idx.")
 
     train_parser.set_defaults (func=process_train)
     
@@ -111,7 +112,7 @@ if __name__ == "__main__":
             model_dir=arguments.model_dir, 
             model_name=arguments.model_name, 
             debug = arguments.debug,
-            force_best_gpu_idx = arguments.force_best_gpu_idx,
+            force_gpu_idx = arguments.force_gpu_idx,
             cpu_only = arguments.cpu_only
             )
         
@@ -122,7 +123,7 @@ if __name__ == "__main__":
     convert_parser.add_argument('--model-dir', required=True, action=fixPathAction, dest="model_dir", help="Model dir.")
     convert_parser.add_argument('--model', required=True, dest="model_name", choices=Path_utils.get_all_dir_names_startswith ( Path(__file__).parent / 'models' , 'Model_'), help="Type of model")
     convert_parser.add_argument('--debug', action="store_true", dest="debug", default=False, help="Debug converter.")
-    convert_parser.add_argument('--force-best-gpu-idx', type=int, dest="force_best_gpu_idx", default=-1, help="Force to choose this GPU idx as best.")
+    convert_parser.add_argument('--force-gpu-idx', type=int, dest="force_gpu_idx", default=-1, help="Force to choose this GPU idx.")
     convert_parser.add_argument('--cpu-only', action="store_true", dest="cpu_only", default=False, help="Convert on CPU.")
     
     convert_parser.set_defaults(func=process_convert)

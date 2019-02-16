@@ -1,13 +1,14 @@
 import os
 import time
 import inspect
-import operator
 import pickle
+import colorsys
 from pathlib import Path
 from utils import Path_utils
 from utils import std_utils
 from utils import image_utils
 from utils.console_utils import *
+from utils.cv2_utils import *
 import numpy as np
 import cv2
 from samples import SampleGeneratorBase
@@ -18,7 +19,18 @@ You can implement your own model. Check examples.
 class ModelBase(object):
 
     #DONT OVERRIDE
-    def __init__(self, model_path, training_data_src_path=None, training_data_dst_path=None, debug = False, force_best_gpu_idx=-1, **in_options):
+    def __init__(self, model_path, training_data_src_path=None, training_data_dst_path=None, debug = False, force_gpu_idx=-1, **in_options):
+    
+        if force_gpu_idx == -1: 
+            idxs_names_list = nnlib.device.getAllDevicesIdxsWithNamesList()
+            if len(idxs_names_list) > 1:
+                print ("You have multi GPUs in a system: ")
+                for idx, name in idxs_names_list:
+                    print ("[%d] : %s" % (idx, name) )
+
+                force_gpu_idx = input_int("Which GPU idx to choose? ( skip: best GPU ) : ", -1, [ x[0] for x in idxs_names_list] )
+        self.force_gpu_idx = force_gpu_idx
+    
         print ("Loading model...")
         self.model_path = model_path
         self.model_data_path = Path( self.get_strpath_storage_for_file('data.dat') )
@@ -35,7 +47,7 @@ class ModelBase(object):
         self.debug = debug
         self.is_training_mode = (training_data_src_path is not None and training_data_dst_path is not None)
         
-        self.supress_std_once = ('TF_SUPPRESS_STD' in os.environ.keys() and os.environ['TF_SUPPRESS_STD'] == '1')
+        self.supress_std_once = os.environ.get('TF_SUPPRESS_STD', '0') == '1'
         
         self.epoch = 0
         self.options = {}
@@ -48,21 +60,12 @@ class ModelBase(object):
                 self.options = model_data['options']
                 self.loss_history = model_data['loss_history'] if 'loss_history' in model_data.keys() else []
                 self.sample_for_preview = model_data['sample_for_preview']  if 'sample_for_preview' in model_data.keys() else None
-            
-        ask_override = self.epoch != 0 and input_in_time ("Press enter during 2 seconds to override some model settings.", 2)
+
+        ask_override = self.is_training_mode and self.epoch != 0 and input_in_time ("Press enter in 2 seconds to override model settings.", 2)
         
         if self.epoch == 0: 
             print ("\nModel first run. Enter model options as default for each run.")
         
-        if (self.epoch == 0 or ask_override) and (force_best_gpu_idx == -1): 
-            idxs_names_list = nnlib.device.getAllDevicesIdxsWithNamesList()
-            if len(idxs_names_list) > 1:
-                print ("You have multi GPUs in a system: ")
-                for idx, name in idxs_names_list:
-                    print ("[%d] : %s" % (idx, name) )
-
-                force_best_gpu_idx = input_int("Which GPU idx to choose? ( skip: system choice ) : ", -1)
-            
         if self.epoch == 0 or ask_override: 
             default_write_preview_history = False if self.epoch == 0 else self.options.get('write_preview_history',False)
             self.options['write_preview_history'] = input_bool("Write preview history? (y/n ?:help skip:n/default) : ", default_write_preview_history, help_message="Preview history will be writed to <ModelName>_history folder.")
@@ -104,14 +107,8 @@ class ModelBase(object):
             self.options.pop('target_epoch') 
            
         self.batch_size = self.options['batch_size']
-
-        self.sort_by_yaw = self.options['sort_by_yaw']
-        if not self.sort_by_yaw:
-            self.options.pop('sort_by_yaw') 
-        
+        self.sort_by_yaw = self.options['sort_by_yaw']        
         self.random_flip = self.options['random_flip']
-        if self.random_flip:
-            self.options.pop('random_flip') 
         
         self.src_scale_mod = self.options['src_scale_mod']
         if self.src_scale_mod == 0:
@@ -119,13 +116,8 @@ class ModelBase(object):
             
         self.onInitializeOptions(self.epoch == 0, ask_override)
         
-        nnlib.import_all ( nnlib.DeviceConfig(allow_growth=False, force_best_gpu_idx=force_best_gpu_idx, **in_options) )
+        nnlib.import_all ( nnlib.DeviceConfig(allow_growth=False, force_gpu_idx=self.force_gpu_idx, **in_options) )
         self.device_config = nnlib.active_DeviceConfig
-        
-        if self.epoch == 0: 
-            self.created_vram_gb = self.options['created_vram_gb'] = self.device_config.gpu_total_vram_gb
-        else:            
-            self.created_vram_gb = self.options['created_vram_gb'] = self.options.get('created_vram_gb',self.device_config.gpu_total_vram_gb)
 
         self.onInitialize(**in_options)
         
@@ -136,7 +128,10 @@ class ModelBase(object):
         
         if self.is_training_mode:
             if self.write_preview_history:
-                self.preview_history_path = self.model_path / ( '%s_history' % (self.get_model_name()) )
+                if self.force_gpu_idx == -1:
+                    self.preview_history_path = self.model_path / ( '%s_history' % (self.get_model_name()) )
+                else:
+                    self.preview_history_path = self.model_path / ( '%d_%s_history' % (self.force_gpu_idx, self.get_model_name()) )
                 
                 if not self.preview_history_path.exists():
                     self.preview_history_path.mkdir(exist_ok=True)
@@ -174,7 +169,7 @@ class ModelBase(object):
             for idx in self.device_config.gpu_idxs:
                 print ("== |== [%d : %s]" % (idx, nnlib.device.getDeviceName(idx)) )
  
-        if not self.device_config.cpu_only and self.device_config.gpu_total_vram_gb == 2:
+        if not self.device_config.cpu_only and self.device_config.gpu_vram_gb[0] == 2:
             print ("==")
             print ("== WARNING: You are using 2GB GPU. Result quality may be significantly decreased.")
             print ("== If training does not start, close all programs and try again.")
@@ -204,7 +199,7 @@ class ModelBase(object):
         pass
 
     #overridable
-    def onTrainOneEpoch(self, sample):
+    def onTrainOneEpoch(self, sample, generator_list):
         #train your keras models here
 
         #return array of losses
@@ -268,7 +263,7 @@ class ModelBase(object):
         
         if self.supress_std_once:
             supressor.__exit__()
-        
+            
         model_data = {
             'epoch': self.epoch,
             'options': self.options,
@@ -277,6 +272,11 @@ class ModelBase(object):
         }            
         self.model_data_path.write_bytes( pickle.dumps(model_data) )
 
+    def load_weights_safe(self, model_filename_list):
+        for model, filename in model_filename_list:
+            if Path(filename).exists():        
+                model.load_weights(filename)
+            
     def save_weights_safe(self, model_filename_list):
         for model, filename in model_filename_list:
             model.save_weights( filename + '.tmp' )
@@ -293,7 +293,8 @@ class ModelBase(object):
         images = []
         for generator in self.generator_list:        
             for i,batch in enumerate(next(generator)):
-                images.append( batch[0] )
+                if len(batch.shape) == 4:
+                    images.append( batch[0] )
         
         return image_utils.equalize_and_stack_square (images)
         
@@ -305,14 +306,12 @@ class ModelBase(object):
             supressor = std_utils.suppress_stdout_stderr()
             supressor.__enter__()
             
-        self.last_sample = self.generate_next_sample() 
-
-        epoch_time = time.time()
-        
-        losses = self.onTrainOneEpoch(self.last_sample)
-        
+        sample = self.generate_next_sample()        
+        epoch_time = time.time()        
+        losses = self.onTrainOneEpoch(sample, self.generator_list)        
         epoch_time = time.time() - epoch_time
-
+        self.last_sample = sample
+        
         self.loss_history.append ( [float(loss[1]) for loss in losses] )
         
         if self.supress_std_once:
@@ -320,9 +319,11 @@ class ModelBase(object):
             self.supress_std_once = False
                   
         if self.write_preview_history:
-            if self.epoch % 10 == 0:
-                img = (self.get_static_preview() * 255).astype(np.uint8)
-                cv2.imwrite ( str (self.preview_history_path / ('%.6d.jpg' %( self.epoch) )), img )     
+            if self.epoch % 10 == 0:            
+                preview = self.get_static_preview()
+                preview_lh = ModelBase.get_loss_history_preview(self.loss_history, self.epoch, preview.shape[1], preview.shape[2])
+                img = (np.concatenate ( [preview_lh, preview], axis=0 ) * 255).astype(np.uint8)
+                cv2_imwrite ( str (self.preview_history_path / ('%.6d.jpg' %( self.epoch) )), img )     
                 
         self.epoch += 1
 
@@ -367,7 +368,10 @@ class ModelBase(object):
         return self.generator_list
         
     def get_strpath_storage_for_file(self, filename):
-        return str( self.model_path / (self.get_model_name() + '_' + filename) )
+        if self.force_gpu_idx == -1:
+            return str( self.model_path / ( self.get_model_name() + '_' + filename) )
+        else:
+            return str( self.model_path / ( str(self.force_gpu_idx) + '_' + self.get_model_name() + '_' + filename) )
 
     def set_vram_batch_requirements (self, d):
         #example d = {2:2,3:4,4:8,5:16,6:32,7:32,8:32,9:48} 
@@ -379,9 +383,68 @@ class ModelBase(object):
         else:
             if self.batch_size == 0:        
                 for x in keys:
-                    if self.device_config.gpu_total_vram_gb <= x:
+                    if self.device_config.gpu_vram_gb[0] <= x:
                         self.batch_size = d[x]
                         break
                         
                 if self.batch_size == 0:
                     self.batch_size = d[ keys[-1] ]
+                    
+    @staticmethod
+    def get_loss_history_preview(loss_history, epoch, w, c):
+        loss_history = np.array (loss_history.copy())
+                
+        lh_height = 100
+        lh_img = np.ones ( (lh_height,w,c) ) * 0.1
+        loss_count = len(loss_history[0])
+        lh_len = len(loss_history)
+        
+        l_per_col = lh_len / w                
+        plist_max = [   [   max (0.0, loss_history[int(col*l_per_col)][p],
+                                            *[  loss_history[i_ab][p] 
+                                                for i_ab in range( int(col*l_per_col), int((col+1)*l_per_col) )                                         
+                                             ]
+                                ) 
+                            for p in range(loss_count)
+                        ]  
+                        for col in range(w)
+                    ]
+
+        plist_min = [   [   min (plist_max[col][p], loss_history[int(col*l_per_col)][p],
+                                            *[  loss_history[i_ab][p] 
+                                                for i_ab in range( int(col*l_per_col), int((col+1)*l_per_col) )                                         
+                                             ]
+                                ) 
+                            for p in range(loss_count) 
+                        ]  
+                        for col in range(w) 
+                    ]
+
+        plist_abs_max = np.mean(loss_history[ len(loss_history) // 5 : ]) * 2
+
+        for col in range(0, w):
+            for p in range(0,loss_count): 
+                point_color = [1.0]*c
+                point_color[0:3] = colorsys.hsv_to_rgb ( p * (1.0/loss_count), 1.0, 1.0 )
+                
+                ph_max = int ( (plist_max[col][p] / plist_abs_max) * (lh_height-1) )
+                ph_max = np.clip( ph_max, 0, lh_height-1 )
+                
+                ph_min = int ( (plist_min[col][p] / plist_abs_max) * (lh_height-1) )
+                ph_min = np.clip( ph_min, 0, lh_height-1 )
+                
+                for ph in range(ph_min, ph_max+1):
+                    lh_img[ (lh_height-ph-1), col ] = point_color
+
+        lh_lines = 5
+        lh_line_height = (lh_height-1)/lh_lines
+        for i in range(0,lh_lines+1):
+            lh_img[ int(i*lh_line_height), : ] = (0.8,)*c
+            
+        last_line_t = int((lh_lines-1)*lh_line_height)
+        last_line_b = int(lh_lines*lh_line_height)
+        
+        lh_text = 'Epoch: %d' % (epoch) if epoch != 0 else ''
+        
+        lh_img[last_line_t:last_line_b, 0:w] += image_utils.get_text_image (  (w,last_line_b-last_line_t,c), lh_text, color=[0.8]*c )
+        return lh_img

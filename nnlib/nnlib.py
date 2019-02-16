@@ -33,13 +33,14 @@ class nnlib(object):
     tf_adain = None
     tf_gaussian_blur = None
     tf_style_loss = None
-
+    
     modelify = None
     ReflectionPadding2D = None
     DSSIMLoss = None
-    DSSIMMaskLoss = None
+    DSSIMMSEMaskLoss = None
     PixelShuffler = None  
     SubpixelUpscaler = None
+    AddUniformNoise = None
     
     ResNet = None
     UNet = None
@@ -51,6 +52,7 @@ class nnlib(object):
 tf = nnlib.tf
 tf_sess = nnlib.tf_sess
 
+tf_reduce_mean = tf.reduce_mean # todo tf 12+ = tf.math.reduce_mean
 tf_total_variation = tf.image.total_variation
 tf_dssim = nnlib.tf_dssim
 tf_ssim = nnlib.tf_ssim
@@ -74,6 +76,7 @@ Conv2D = keras.layers.Conv2D
 Conv2DTranspose = keras.layers.Conv2DTranspose
 SeparableConv2D = keras.layers.SeparableConv2D
 MaxPooling2D = keras.layers.MaxPooling2D
+UpSampling2D = keras.layers.UpSampling2D
 BatchNormalization = keras.layers.BatchNormalization
 
 LeakyReLU = keras.layers.LeakyReLU
@@ -82,6 +85,7 @@ tanh = keras.layers.Activation('tanh')
 sigmoid = keras.layers.Activation('sigmoid')
 Dropout = keras.layers.Dropout
 
+Lambda = keras.layers.Lambda
 Add = keras.layers.Add
 Concatenate = keras.layers.Concatenate
 
@@ -98,15 +102,18 @@ Adam = keras.optimizers.Adam
 modelify = nnlib.modelify
 ReflectionPadding2D = nnlib.ReflectionPadding2D
 DSSIMLoss = nnlib.DSSIMLoss
-DSSIMMaskLoss = nnlib.DSSIMMaskLoss
+DSSIMMSEMaskLoss = nnlib.DSSIMMSEMaskLoss
 PixelShuffler = nnlib.PixelShuffler
 SubpixelUpscaler = nnlib.SubpixelUpscaler
+AddUniformNoise = nnlib.AddUniformNoise
 """
     code_import_keras_contrib_string = \
 """
 keras_contrib = nnlib.keras_contrib
 GroupNormalization = keras_contrib.layers.GroupNormalization
 InstanceNormalization = keras_contrib.layers.InstanceNormalization
+Padam = keras_contrib.optimizers.Padam
+PELU = keras_contrib.layers.advanced_activations.PELU
 """
     code_import_dlib_string = \
 """
@@ -333,12 +340,28 @@ NLayerDiscriminator = nnlib.NLayerDiscriminator
             gauss_kernel = gauss_kernel[:, :, tf.newaxis, tf.newaxis]
             
             def func(input):
-                return tf.nn.conv2d(input, gauss_kernel, strides=[1, 1, 1, 1], padding="SAME")
+                input_nc = input.get_shape().as_list()[-1]
+                inputs = tf.split(input, input_nc, -1)
+                
+                outputs = []
+                for i in range(len(inputs)):
+                    outputs += [ tf.nn.conv2d( inputs[i] , gauss_kernel, strides=[1, 1, 1, 1], padding="SAME") ]
+
+                return tf.concat (outputs, axis=-1)
             return func
         nnlib.tf_gaussian_blur = tf_gaussian_blur
 
+        #any channel count style diff
+        #outputs 0.0 .. 1.0 style difference*loss_weight , 0.0 - no diff
         def tf_style_loss(gaussian_blur_radius=0.0, loss_weight=1.0, batch_normalize=False, epsilon=1e-5):
-            def sl(content, style):
+            gblur = tf_gaussian_blur(gaussian_blur_radius)
+            
+            def sd(content, style):
+                content_nc = content.get_shape().as_list()[-1]
+                style_nc = style.get_shape().as_list()[-1]
+                if content_nc != style_nc:
+                    raise Exception("tf_style_loss() content_nc != style_nc")
+                    
                 axes = [1,2]
                 c_mean, c_var = tf.nn.moments(content, axes=axes, keep_dims=True)
                 s_mean, s_var = tf.nn.moments(style, axes=axes, keep_dims=True)
@@ -356,27 +379,14 @@ NLayerDiscriminator = nnlib.NLayerDiscriminator
                 return (mean_loss + std_loss) * loss_weight
                 
             def func(target, style):
-                target_nc = target.get_shape().as_list()[-1]
-                style_nc = style.get_shape().as_list()[-1]
-                if target_nc != style_nc:
-                    raise Exception("target_nc != style_nc")
-                   
-                targets = tf.split(target, target_nc, -1)
-                styles = tf.split(style, style_nc, -1)
-                
-                style_loss = []
-                for i in range(len(targets)):
-                    if gaussian_blur_radius > 0.0:
-                        style_loss += [ sl( tf_gaussian_blur(gaussian_blur_radius)(targets[i]), 
-                                            tf_gaussian_blur(gaussian_blur_radius)(styles[i]))  ]
-                    else:
-                        style_loss += [ sl( targets[i], 
-                                            styles[i])  ]
-                return np.sum ( style_loss )  
+                if gaussian_blur_radius > 0.0:
+                    return sd( gblur(target), gblur(style))
+                else:
+                    return sd( target, style )
             return func
             
         nnlib.tf_style_loss = tf_style_loss
-        
+
     @staticmethod
     def import_keras(device_config = None):
         if nnlib.keras is not None:
@@ -408,7 +418,8 @@ NLayerDiscriminator = nnlib.NLayerDiscriminator
         tf = nnlib.tf
         keras = nnlib.keras
         K = keras.backend
-
+        exec (nnlib.code_import_tf, locals(), globals())
+        
         def modelify(model_functor):
             def func(tensor):
                 return keras.models.Model (tensor, model_functor(tensor))
@@ -441,44 +452,22 @@ NLayerDiscriminator = nnlib.NLayerDiscriminator
                 else:
                     return (1.0 - tf.image.ssim ((y_true/2+0.5), (y_pred/2+0.5), 1.0)) / 2.0
         nnlib.DSSIMLoss = DSSIMLoss
-
-        class DSSIMLoss(object):
-            def __init__(self, is_tanh=False):
-                self.is_tanh = is_tanh
-                
-            def __call__(self,y_true, y_pred):
-
-                if not self.is_tanh:            
-                    loss = (1.0 - tf.image.ssim (y_true, y_pred, 1.0)) / 2.0
-                else:
-                    loss = (1.0 - tf.image.ssim ( (y_true/2+0.5), (y_pred/2+0.5), 1.0)) / 2.0
-
-                return loss
-        nnlib.DSSIMLoss = DSSIMLoss
         
-        class DSSIMMaskLoss(object):
-            def __init__(self, mask_list, is_tanh=False):
-                self.mask_list = mask_list
-                self.is_tanh = is_tanh
+        class DSSIMMSEMaskLoss(object):
+            def __init__(self, mask, is_mse=False):
+                self.mask = mask
+                self.is_mse = is_mse
                 
             def __call__(self,y_true, y_pred):
                 total_loss = None
-                for mask in self.mask_list:
-                
-                    if not self.is_tanh:            
-                        loss = (1.0 - (tf.image.ssim (y_true*mask, y_pred*mask, 1.0))) / 2.0
-                    else:
-                        loss = (1.0 - tf.image.ssim ( (y_true/2+0.5)*(mask/2+0.5), (y_pred/2+0.5)*(mask/2+0.5), 1.0)) / 2.0
-                    
-                    loss = K.cast (loss, K.floatx())
-                    
-                    if total_loss is None:
-                        total_loss = loss
-                    else:
-                        total_loss += loss
-                        
-                return total_loss
-        nnlib.DSSIMMaskLoss = DSSIMMaskLoss
+       
+                mask = self.mask
+                if self.is_mse:                
+                    blur_mask = tf_gaussian_blur(max(1, mask.get_shape().as_list()[1] // 32))(mask)
+                    return K.mean ( 100*K.square( y_true*blur_mask - y_pred*blur_mask ) )
+                else:
+                    return (1.0 - (tf.image.ssim (y_true*mask, y_pred*mask, 1.0))) / 2.0
+        nnlib.DSSIMMSEMaskLoss = DSSIMMSEMaskLoss
         
         class PixelShuffler(keras.layers.Layer):
             def __init__(self, size=(2, 2), data_format=None, **kwargs):
@@ -541,6 +530,25 @@ NLayerDiscriminator = nnlib.NLayerDiscriminator
         nnlib.PixelShuffler = PixelShuffler
         nnlib.SubpixelUpscaler = PixelShuffler
         
+        class AddUniformNoise(keras.layers.Layer):
+            def __init__(self, power=1.0, minval=-1.0, maxval=1.0, **kwargs):
+                super(AddUniformNoise, self).__init__(**kwargs)
+                self.power = power
+                self.supports_masking = True
+                self.minval = minval
+                self.maxval = maxval
+
+            def call(self, inputs, training=None):
+                def noised():
+                    return inputs + self.power*K.random_uniform(shape=K.shape(inputs), minval=self.minval, maxval=self.maxval)
+                return K.in_train_phase(noised, inputs, training=training)
+
+            def get_config(self):
+                config = {'power': self.power, 'minval': self.minval, 'maxval': self.maxval}
+                base_config = super(AddUniformNoise, self).get_config()
+                return dict(list(base_config.items()) + list(config.items()))
+        nnlib.AddUniformNoise = AddUniformNoise       
+                
     @staticmethod
     def import_keras_contrib(device_config = None):
         if nnlib.keras_contrib is not None:
@@ -704,8 +712,8 @@ NLayerDiscriminator = nnlib.NLayerDiscriminator
 
                 unet_block = UNetSkipConnection(ngf * 8, ngf * 8, sub_model=None, innermost=True)
 
-                #for i in range(num_downs - 5):
-                #    unet_block = UNetSkipConnection(ngf * 8, ngf * 8, sub_model=unet_block, use_dropout=use_dropout)
+                for i in range(num_downs - 5):
+                    unet_block = UNetSkipConnection(ngf * 8, ngf * 8, sub_model=unet_block, use_dropout=use_dropout)
                 
                 unet_block = UNetSkipConnection(ngf * 4  , ngf * 8, sub_model=unet_block)
                 unet_block = UNetSkipConnection(ngf * 2  , ngf * 4, sub_model=unet_block)
